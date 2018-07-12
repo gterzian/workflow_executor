@@ -2,7 +2,6 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::mpsc::{Sender, Receiver, channel};
 use std::thread;
-use std::time::Instant;
 
 
 type WorkFlowId = u64;
@@ -34,9 +33,7 @@ impl WorkFlow {
 }
 
 struct WorkFlowExecution {
-    workflow_id: WorkFlowId,
     pub current_step: Cell<StepIndex>,
-    created: Instant
 }
 
 struct WorkFlowExecutor {
@@ -50,9 +47,7 @@ impl WorkFlowExecutor {
         match self.port.try_recv() {
             Ok(ExecutorMsg::Execute(workflow)) => {
                 let execution = WorkFlowExecution {
-                    workflow_id: workflow.id,
                     current_step: Cell::new(0),
-                    created: Instant::now()
                 };
                 self.executions.push((workflow, execution));
             },

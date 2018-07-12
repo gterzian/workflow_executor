@@ -109,6 +109,7 @@ fn test_run_workflows() {
         let _ = track_steps.insert(id, 0);
         let workflow = Workflow::new(id, 4);
         if id / 2 == 0 {
+            // Patent-pending load balancer...
             let _ = executor_1.send(ExecutorMsg::Execute(workflow));
         } else {
             let _ = executor_2.send(ExecutorMsg::Execute(workflow));

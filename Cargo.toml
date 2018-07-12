@@ -1,0 +1,4 @@
+[package]
+name = "workflow"
+version = "0.1.0"
+authors = ["Gregory Terzian<gregory.terzian@gmail.com>"]

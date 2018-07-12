@@ -1,0 +1,146 @@
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::mpsc::{Sender, Receiver, channel};
+use std::thread;
+use std::time::Instant;
+
+
+type WorkFlowId = u64;
+type NumberOfSteps = usize;
+type StepIndex = usize;
+
+enum ExecutorMsg {
+    Execute(WorkFlow),
+    Quit
+}
+
+enum WorkFlowMsg {
+    Done(WorkFlowId),
+    StepExecuted(WorkFlowId, StepIndex),
+}
+
+struct WorkFlow {
+    pub id: WorkFlowId,
+    pub number_of_steps: NumberOfSteps,
+}
+
+impl WorkFlow {
+    fn new(id: WorkFlowId, steps: NumberOfSteps) -> WorkFlow {
+        WorkFlow {
+            id: id,
+            number_of_steps: steps
+        }
+    }
+}
+
+struct WorkFlowExecution {
+    workflow_id: WorkFlowId,
+    pub current_step: Cell<StepIndex>,
+    created: Instant
+}
+
+struct WorkFlowExecutor {
+    executions: Vec<(WorkFlow, WorkFlowExecution)>,
+    port: Receiver<ExecutorMsg>,
+    chan: Sender<WorkFlowMsg>
+}
+
+impl WorkFlowExecutor {
+    fn handle_a_msg(&mut self) -> bool {
+        match self.port.try_recv() {
+            Ok(ExecutorMsg::Execute(workflow)) => {
+                let execution = WorkFlowExecution {
+                    workflow_id: workflow.id,
+                    current_step: Cell::new(0),
+                    created: Instant::now()
+                };
+                self.executions.push((workflow, execution));
+            },
+            Ok(ExecutorMsg::Quit) => {
+                return false
+            },
+            Err(_) => {
+                // Empty mailbox.
+            }
+        }
+        true
+    }
+
+    fn execute_a_step(&mut self) {
+        if let Some((workflow, execution)) = self.executions.pop() {
+            if execution.current_step.get() < workflow.number_of_steps {
+                execution.current_step.set(execution.current_step.get() + 1);
+                let _ = self.chan.send(WorkFlowMsg::StepExecuted(workflow.id, execution.current_step.get()));
+            }
+            if execution.current_step.get() < workflow.number_of_steps {
+                self.executions.push((workflow, execution));
+            } else {
+                let _ = self.chan.send(WorkFlowMsg::Done(workflow.id));
+            }
+        }
+    }
+
+    fn run(&mut self) -> bool {
+        if !self.handle_a_msg() {
+            return false
+        }
+        self.execute_a_step();
+        true
+    }
+}
+
+fn start_executor(chan: Sender<WorkFlowMsg>, name: String) -> Sender<ExecutorMsg> {
+    let (executor_chan, executor_port) = channel();
+    let _ = thread::Builder::new().name(name).spawn(move || {
+        let mut executor = WorkFlowExecutor {
+            executions: Default::default(),
+            port: executor_port,
+            chan: chan,
+        };
+        while executor.run() {
+            // Running...
+        }
+    });
+    executor_chan
+}
+
+#[test]
+fn test_run_workflows() {
+    let (results_sender, results_receiver) = channel();
+    let executor_1 = start_executor(results_sender.clone(), "ExecutorThread_1".to_string());
+    let executor_2 = start_executor(results_sender.clone(), "ExecutorThread_2".to_string());
+    let mut track_steps = HashMap::new();
+    for id in 0..5 {
+        let _ = track_steps.insert(id, 0);
+        let workflow = WorkFlow::new(id, 4);
+        if id / 2 == 0 {
+            let _ = executor_1.send(ExecutorMsg::Execute(workflow));
+        } else {
+            let _ = executor_2.send(ExecutorMsg::Execute(workflow));
+        }
+    }
+    let mut done = 0;
+    for msg in results_receiver.iter() {
+        match msg {
+            WorkFlowMsg::StepExecuted(workflow_id, index) => {
+                let last_step = *track_steps.get(&workflow_id).unwrap();
+                // Check the order of the steps for a workflow.
+                assert_eq!(last_step, index - 1);
+                let _ = track_steps.insert(workflow_id, index);
+            },
+            WorkFlowMsg::Done(workflow_id) => {
+                let last_step = *track_steps.get(&workflow_id).unwrap();
+                // Check all steps were done.
+                assert_eq!(last_step, 4);
+                done = done + 1;
+                if done == 5 {
+                    let _ = executor_1.send(ExecutorMsg::Quit);
+                    let _ = executor_2.send(ExecutorMsg::Quit);
+                    break;
+                }
+            }
+        }
+    }
+    // Check all workflows are done.
+    assert_eq!(done, 5);
+}

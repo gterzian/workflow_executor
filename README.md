@@ -8,3 +8,5 @@
 2. `git clone git@github.com:gterzian/workflow_executor.git`
 3. `cd workflow_executor`
 4. `cargo test`
+
+Alternatively, just look at it running on [travis]((https://travis-ci.org/gterzian/workflow_executor))...

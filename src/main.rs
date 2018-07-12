@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{Sender, Receiver, channel};
 use std::thread;
 
@@ -37,7 +37,7 @@ struct WorkflowExecution {
 }
 
 struct WorkflowExecutor {
-    executions: Vec<(Workflow, WorkflowExecution)>,
+    executions: VecDeque<(Workflow, WorkflowExecution)>,
     port: Receiver<ExecutorMsg>,
     chan: Sender<WorkflowMsg>
 }
@@ -49,7 +49,7 @@ impl WorkflowExecutor {
                 let execution = WorkflowExecution {
                     current_step: Cell::new(0),
                 };
-                self.executions.push((workflow, execution));
+                self.executions.push_back((workflow, execution));
             },
             Ok(ExecutorMsg::Quit) => {
                 return false
@@ -62,13 +62,13 @@ impl WorkflowExecutor {
     }
 
     fn execute_a_step(&mut self) {
-        if let Some((workflow, execution)) = self.executions.pop() {
+        if let Some((workflow, execution)) = self.executions.pop_front() {
             if execution.current_step.get() < workflow.number_of_steps {
                 execution.current_step.set(execution.current_step.get() + 1);
                 let _ = self.chan.send(WorkflowMsg::StepExecuted(workflow.id, execution.current_step.get()));
             }
             if execution.current_step.get() < workflow.number_of_steps {
-                self.executions.push((workflow, execution));
+                self.executions.push_back((workflow, execution));
             } else {
                 let _ = self.chan.send(WorkflowMsg::Done(workflow.id));
             }

@@ -106,12 +106,13 @@ fn test_run_workflows() {
                              start_executor(results_sender.clone())];
     let mut track_steps = HashMap::new();
     let number_of_workflows = 5;
+    let number_of_steps = 4;
     {
         // Scoping the iterator, since the vec is still used later.
         let mut executors = all_executors.iter().cycle();
         for id in 0..number_of_workflows {
             let _ = track_steps.insert(id, 0);
-            let workflow = Workflow::new(id, 4);
+            let workflow = Workflow::new(id, number_of_steps);
             if let Some(executor) = executors.next() {
                 let _ = executor.send(ExecutorMsg::Execute(workflow));
             }
@@ -129,7 +130,7 @@ fn test_run_workflows() {
             WorkflowMsg::Done(workflow_id) => {
                 let last_step = *track_steps.get(&workflow_id).unwrap();
                 // Check all steps were done.
-                assert_eq!(last_step, 4);
+                assert_eq!(last_step, number_of_steps);
                 done = done + 1;
                 if done == number_of_workflows {
                     for executor in all_executors {

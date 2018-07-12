@@ -105,10 +105,11 @@ fn test_run_workflows() {
     let all_executors = vec![start_executor(results_sender.clone()),
                              start_executor(results_sender.clone())];
     let mut track_steps = HashMap::new();
+    let number_of_workflows = 5;
     {
         // Scoping the iterator, since the vec is still used later.
         let mut executors = all_executors.iter().cycle();
-        for id in 0..5 {
+        for id in 0..number_of_workflows {
             let _ = track_steps.insert(id, 0);
             let workflow = Workflow::new(id, 4);
             if let Some(executor) = executors.next() {
@@ -130,7 +131,7 @@ fn test_run_workflows() {
                 // Check all steps were done.
                 assert_eq!(last_step, 4);
                 done = done + 1;
-                if done == 5 {
+                if done == number_of_workflows {
                     for executor in all_executors {
                         let _ = executor.send(ExecutorMsg::Quit);
                     }
@@ -140,5 +141,5 @@ fn test_run_workflows() {
         }
     }
     // Check all workflows are done.
-    assert_eq!(done, 5);
+    assert_eq!(done, number_of_workflows);
 }

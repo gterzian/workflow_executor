@@ -4,49 +4,49 @@ use std::sync::mpsc::{Sender, Receiver, channel};
 use std::thread;
 
 
-type WorkFlowId = u64;
+type WorkflowId = u64;
 type NumberOfSteps = usize;
 type StepIndex = usize;
 
 enum ExecutorMsg {
-    Execute(WorkFlow),
+    Execute(Workflow),
     Quit
 }
 
-enum WorkFlowMsg {
-    Done(WorkFlowId),
-    StepExecuted(WorkFlowId, StepIndex),
+enum WorkflowMsg {
+    Done(WorkflowId),
+    StepExecuted(WorkflowId, StepIndex),
 }
 
-struct WorkFlow {
-    pub id: WorkFlowId,
+struct Workflow {
+    pub id: WorkflowId,
     pub number_of_steps: NumberOfSteps,
 }
 
-impl WorkFlow {
-    fn new(id: WorkFlowId, steps: NumberOfSteps) -> WorkFlow {
-        WorkFlow {
+impl Workflow {
+    fn new(id: WorkflowId, steps: NumberOfSteps) -> Workflow {
+        Workflow {
             id: id,
             number_of_steps: steps
         }
     }
 }
 
-struct WorkFlowExecution {
+struct WorkflowExecution {
     pub current_step: Cell<StepIndex>,
 }
 
-struct WorkFlowExecutor {
-    executions: Vec<(WorkFlow, WorkFlowExecution)>,
+struct WorkflowExecutor {
+    executions: Vec<(Workflow, WorkflowExecution)>,
     port: Receiver<ExecutorMsg>,
-    chan: Sender<WorkFlowMsg>
+    chan: Sender<WorkflowMsg>
 }
 
-impl WorkFlowExecutor {
+impl WorkflowExecutor {
     fn handle_a_msg(&mut self) -> bool {
         match self.port.try_recv() {
             Ok(ExecutorMsg::Execute(workflow)) => {
-                let execution = WorkFlowExecution {
+                let execution = WorkflowExecution {
                     current_step: Cell::new(0),
                 };
                 self.executions.push((workflow, execution));
@@ -65,12 +65,12 @@ impl WorkFlowExecutor {
         if let Some((workflow, execution)) = self.executions.pop() {
             if execution.current_step.get() < workflow.number_of_steps {
                 execution.current_step.set(execution.current_step.get() + 1);
-                let _ = self.chan.send(WorkFlowMsg::StepExecuted(workflow.id, execution.current_step.get()));
+                let _ = self.chan.send(WorkflowMsg::StepExecuted(workflow.id, execution.current_step.get()));
             }
             if execution.current_step.get() < workflow.number_of_steps {
                 self.executions.push((workflow, execution));
             } else {
-                let _ = self.chan.send(WorkFlowMsg::Done(workflow.id));
+                let _ = self.chan.send(WorkflowMsg::Done(workflow.id));
             }
         }
     }
@@ -84,10 +84,10 @@ impl WorkFlowExecutor {
     }
 }
 
-fn start_executor(chan: Sender<WorkFlowMsg>, name: String) -> Sender<ExecutorMsg> {
+fn start_executor(chan: Sender<WorkflowMsg>, name: String) -> Sender<ExecutorMsg> {
     let (executor_chan, executor_port) = channel();
     let _ = thread::Builder::new().name(name).spawn(move || {
-        let mut executor = WorkFlowExecutor {
+        let mut executor = WorkflowExecutor {
             executions: Default::default(),
             port: executor_port,
             chan: chan,
@@ -107,7 +107,7 @@ fn test_run_workflows() {
     let mut track_steps = HashMap::new();
     for id in 0..5 {
         let _ = track_steps.insert(id, 0);
-        let workflow = WorkFlow::new(id, 4);
+        let workflow = Workflow::new(id, 4);
         if id / 2 == 0 {
             let _ = executor_1.send(ExecutorMsg::Execute(workflow));
         } else {
@@ -117,13 +117,13 @@ fn test_run_workflows() {
     let mut done = 0;
     for msg in results_receiver.iter() {
         match msg {
-            WorkFlowMsg::StepExecuted(workflow_id, index) => {
+            WorkflowMsg::StepExecuted(workflow_id, index) => {
                 let last_step = *track_steps.get(&workflow_id).unwrap();
                 // Check the order of the steps for a workflow.
                 assert_eq!(last_step, index - 1);
                 let _ = track_steps.insert(workflow_id, index);
             },
-            WorkFlowMsg::Done(workflow_id) => {
+            WorkflowMsg::Done(workflow_id) => {
                 let last_step = *track_steps.get(&workflow_id).unwrap();
                 // Check all steps were done.
                 assert_eq!(last_step, 4);

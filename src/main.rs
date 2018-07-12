@@ -106,7 +106,7 @@ fn test_run_workflows() {
                              start_executor(results_sender.clone())];
     let mut track_steps = HashMap::new();
     {
-        // Scoping to avoid cloning all_executors.
+        // Scoping the iterator, since the vec is still used later.
         let mut executors = all_executors.iter().cycle();
         for id in 0..5 {
             let _ = track_steps.insert(id, 0);

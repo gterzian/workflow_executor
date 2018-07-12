@@ -1,5 +1,6 @@
 #### Workflow execution
 
+[![Build Status](https://travis-ci.org/gterzian/workflow_executor.svg?branch=master)](https://travis-ci.org/gterzian/workflow_executor)
 
 ##### How to run:
 

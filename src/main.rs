@@ -84,9 +84,9 @@ impl WorkflowExecutor {
     }
 }
 
-fn start_executor(chan: Sender<WorkflowMsg>, name: String) -> Sender<ExecutorMsg> {
+fn start_executor(chan: Sender<WorkflowMsg>) -> Sender<ExecutorMsg> {
     let (executor_chan, executor_port) = channel();
-    let _ = thread::Builder::new().name(name).spawn(move || {
+    let _ = thread::Builder::new().spawn(move || {
         let mut executor = WorkflowExecutor {
             executions: Default::default(),
             port: executor_port,
@@ -102,17 +102,18 @@ fn start_executor(chan: Sender<WorkflowMsg>, name: String) -> Sender<ExecutorMsg
 #[test]
 fn test_run_workflows() {
     let (results_sender, results_receiver) = channel();
-    let executor_1 = start_executor(results_sender.clone(), "ExecutorThread_1".to_string());
-    let executor_2 = start_executor(results_sender.clone(), "ExecutorThread_2".to_string());
+    let all_executors = vec![start_executor(results_sender.clone()),
+                             start_executor(results_sender.clone())];
     let mut track_steps = HashMap::new();
-    for id in 0..5 {
-        let _ = track_steps.insert(id, 0);
-        let workflow = Workflow::new(id, 4);
-        if id / 2 == 0 {
-            // Patent-pending load balancer...
-            let _ = executor_1.send(ExecutorMsg::Execute(workflow));
-        } else {
-            let _ = executor_2.send(ExecutorMsg::Execute(workflow));
+    {
+        // Scoping to avoid cloning all_executors.
+        let mut executors = all_executors.iter().cycle();
+        for id in 0..5 {
+            let _ = track_steps.insert(id, 0);
+            let workflow = Workflow::new(id, 4);
+            if let Some(executor) = executors.next() {
+                let _ = executor.send(ExecutorMsg::Execute(workflow));
+            }
         }
     }
     let mut done = 0;
@@ -130,8 +131,9 @@ fn test_run_workflows() {
                 assert_eq!(last_step, 4);
                 done = done + 1;
                 if done == 5 {
-                    let _ = executor_1.send(ExecutorMsg::Quit);
-                    let _ = executor_2.send(ExecutorMsg::Quit);
+                    for executor in all_executors {
+                        let _ = executor.send(ExecutorMsg::Quit);
+                    }
                     break;
                 }
             }

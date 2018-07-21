@@ -15,14 +15,15 @@ enum ExecutorMsg {
     Quit
 }
 
-enum WorkflowMsg {
-    Done(WorkflowId),
-    StepExecuted(WorkflowId, StepIndex),
-}
-
 enum ConsumerMsg {
     Done(WorkflowId),
     StepExecuted(WorkflowId, StepIndex),
+    ExpectWorkflow(WorkflowId),
+}
+
+#[derive(Debug, PartialEq)]
+enum ConsumerControlMsg {
+    AllWorkflowDone
 }
 
 enum ProducerMsg {
@@ -35,7 +36,7 @@ enum ProducerControlMsg {
 
 enum MainMsg {
     FromProducer(ProducerMsg),
-    FromConsumer(ConsumerMsg)
+    FromConsumer(ConsumerControlMsg)
 }
 
 struct Workflow {
@@ -59,7 +60,7 @@ struct WorkflowExecution {
 struct WorkflowExecutor {
     executions: VecDeque<(Workflow, WorkflowExecution)>,
     port: Receiver<ExecutorMsg>,
-    chan: Sender<WorkflowMsg>
+    chan: Sender<ConsumerMsg>
 }
 
 impl WorkflowExecutor {
@@ -85,12 +86,12 @@ impl WorkflowExecutor {
         if let Some((workflow, execution)) = self.executions.pop_front() {
             if execution.current_step.get() < workflow.number_of_steps {
                 execution.current_step.set(execution.current_step.get() + 1);
-                let _ = self.chan.send(WorkflowMsg::StepExecuted(workflow.id, execution.current_step.get()));
+                let _ = self.chan.send(ConsumerMsg::StepExecuted(workflow.id, execution.current_step.get()));
             }
             if execution.current_step.get() < workflow.number_of_steps {
                 self.executions.push_back((workflow, execution));
             } else {
-                let _ = self.chan.send(WorkflowMsg::Done(workflow.id));
+                let _ = self.chan.send(ConsumerMsg::Done(workflow.id));
             }
         }
     }
@@ -143,7 +144,7 @@ impl WorkflowProducer {
 }
 
 
-fn start_executor(chan: Sender<WorkflowMsg>) -> Sender<ExecutorMsg> {
+fn start_executor(chan: Sender<ConsumerMsg>) -> Sender<ExecutorMsg> {
     let (executor_chan, executor_port) = channel();
     let _ = thread::Builder::new().spawn(move || {
         let mut executor = WorkflowExecutor {
@@ -158,16 +159,33 @@ fn start_executor(chan: Sender<WorkflowMsg>) -> Sender<ExecutorMsg> {
     executor_chan
 }
 
-fn start_consumer(chan: Sender<ConsumerMsg>) -> Sender<WorkflowMsg> {
+fn start_consumer(chan: Sender<ConsumerControlMsg>,
+                  number_of_workflows: usize,
+                  number_of_steps: usize)
+                  -> Sender<ConsumerMsg> {
     let (consumer_chan, consumer_port) = channel();
     let _ = thread::Builder::new().spawn(move || {
+        let mut track_steps = HashMap::new();
+        let mut done = 0;
         for msg in consumer_port.iter() {
             match msg {
-                WorkflowMsg::StepExecuted(workflow_id, index) => {
-                    let _ = chan.send(ConsumerMsg::StepExecuted(workflow_id, index));
+                ConsumerMsg::StepExecuted(workflow_id, index) => {
+                    let last_step = *track_steps.get(&workflow_id).unwrap();
+                    // Check the order of the steps for a workflow.
+                    assert_eq!(last_step, index - 1);
+                    let _ = track_steps.insert(workflow_id, index);
                 },
-                WorkflowMsg::Done(workflow_id) => {
-                    let _ = chan.send(ConsumerMsg::Done(workflow_id));
+                ConsumerMsg::Done(workflow_id) => {
+                    let last_step = *track_steps.get(&workflow_id).unwrap();
+                    // Check all steps were done.
+                    assert_eq!(last_step, number_of_steps);
+                    done = done + 1;
+                    if done == number_of_workflows {
+                        let _ = chan.send(ConsumerControlMsg::AllWorkflowDone);
+                    }
+                }
+                ConsumerMsg::ExpectWorkflow(workflow_id) => {
+                    let _ = track_steps.insert(workflow_id, 0);
                 }
             }
         }
@@ -199,15 +217,13 @@ fn start_producer(chan: Sender<ProducerMsg>,
 fn test_run_workflows() {
     let (results_sender, results_receiver) = channel();
     let (work_sender, work_receiver) = channel();
-    let consumer_sender = start_consumer(results_sender);
-    let mut all_executors: VecDeque<Sender<ExecutorMsg>> = vec![start_executor(consumer_sender.clone()),
-                                                                start_executor(consumer_sender.clone())]
-                                                                .into_iter().collect();
-    let mut track_steps = HashMap::new();
-    let mut done = 0;
     let number_of_workflows = 5;
     let number_of_steps = 4;
+    let consumer_sender = start_consumer(results_sender, number_of_workflows, number_of_steps);
     let producer_chan = start_producer(work_sender, number_of_workflows, number_of_steps);
+    let executors = vec![start_executor(consumer_sender.clone()),
+                         start_executor(consumer_sender.clone())];
+    let mut executor_queue: VecDeque<Sender<ExecutorMsg>> = executors.into_iter().collect();
     loop {
         let msg = {
             let sel = Select::new();
@@ -228,37 +244,21 @@ fn test_run_workflows() {
         };
         let result = match msg {
              MainMsg::FromProducer(ProducerMsg::Incoming(workflow)) => {
-                let _ = track_steps.insert(workflow.id, 0);
-                if let Some(executor) = all_executors.pop_front() {
+                let _ = consumer_sender.send(ConsumerMsg::ExpectWorkflow(workflow.id));
+                if let Some(executor) = executor_queue.pop_front() {
                     let _ = executor.send(ExecutorMsg::Execute(workflow));
-                    all_executors.push_back(executor);
+                    executor_queue.push_back(executor);
                 }
                 continue;
             },
             MainMsg::FromConsumer(msg) => msg
         };
-        match result {
-            ConsumerMsg::StepExecuted(workflow_id, index) => {
-                let last_step = *track_steps.get(&workflow_id).unwrap();
-                // Check the order of the steps for a workflow.
-                assert_eq!(last_step, index - 1);
-                let _ = track_steps.insert(workflow_id, index);
-            },
-            ConsumerMsg::Done(workflow_id) => {
-                let last_step = *track_steps.get(&workflow_id).unwrap();
-                // Check all steps were done.
-                assert_eq!(last_step, number_of_steps);
-                done = done + 1;
-                if done == number_of_workflows {
-                    for executor in all_executors {
-                        let _ = executor.send(ExecutorMsg::Quit);
-                    }
-                    let _ = producer_chan.send(ProducerControlMsg::Quit);
-                    break;
-                }
-            }
+        // The only message the consumer will send, is that all is done.
+        assert_eq!(result, ConsumerControlMsg::AllWorkflowDone);
+        for executor in executor_queue {
+            let _ = executor.send(ExecutorMsg::Quit);
         }
+        let _ = producer_chan.send(ProducerControlMsg::Quit);
+        break;
     }
-    // Check all workflows are done.
-    assert_eq!(done, number_of_workflows);
 }

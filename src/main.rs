@@ -18,6 +18,11 @@ enum WorkflowMsg {
     StepExecuted(WorkflowId, StepIndex),
 }
 
+enum MainMsg {
+    Done(WorkflowId),
+    StepExecuted(WorkflowId, StepIndex),
+}
+
 struct Workflow {
     pub id: WorkflowId,
     pub number_of_steps: NumberOfSteps,
@@ -99,11 +104,29 @@ fn start_executor(chan: Sender<WorkflowMsg>) -> Sender<ExecutorMsg> {
     executor_chan
 }
 
+fn start_consumer(chan: Sender<MainMsg>) -> Sender<WorkflowMsg> {
+    let (consumer_chan, consumer_port) = channel();
+    let _ = thread::Builder::new().spawn(move || {
+        for msg in consumer_port.iter() {
+            match msg {
+                WorkflowMsg::StepExecuted(workflow_id, index) => {
+                    let _ = chan.send(MainMsg::StepExecuted(workflow_id, index));
+                },
+                WorkflowMsg::Done(workflow_id) => {
+                    let _ = chan.send(MainMsg::Done(workflow_id));
+                }
+            }
+        }
+    });
+    consumer_chan
+}
+
 #[test]
 fn test_run_workflows() {
     let (results_sender, results_receiver) = channel();
-    let all_executors = vec![start_executor(results_sender.clone()),
-                             start_executor(results_sender.clone())];
+    let consumer_sender = start_consumer(results_sender);
+    let all_executors = vec![start_executor(consumer_sender.clone()),
+                             start_executor(consumer_sender.clone())];
     let mut track_steps = HashMap::new();
     let number_of_workflows = 5;
     let number_of_steps = 4;
@@ -121,13 +144,13 @@ fn test_run_workflows() {
     let mut done = 0;
     for msg in results_receiver.iter() {
         match msg {
-            WorkflowMsg::StepExecuted(workflow_id, index) => {
+            MainMsg::StepExecuted(workflow_id, index) => {
                 let last_step = *track_steps.get(&workflow_id).unwrap();
                 // Check the order of the steps for a workflow.
                 assert_eq!(last_step, index - 1);
                 let _ = track_steps.insert(workflow_id, index);
             },
-            WorkflowMsg::Done(workflow_id) => {
+            MainMsg::Done(workflow_id) => {
                 let last_step = *track_steps.get(&workflow_id).unwrap();
                 // Check all steps were done.
                 assert_eq!(last_step, number_of_steps);

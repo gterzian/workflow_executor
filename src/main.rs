@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{Select, Sender, SyncSender, Receiver, channel, sync_channel};
+use std::sync::mpsc::{Select, Sender, Receiver, channel};
 use std::thread;
 
 
@@ -39,7 +39,6 @@ enum MainMsg {
     FromConsumer(ConsumerControlMsg)
 }
 
-#[derive(Clone)]
 struct Workflow {
     pub id: WorkflowId,
     pub number_of_steps: NumberOfSteps,
@@ -98,10 +97,8 @@ impl WorkflowExecutor {
     }
 
     fn run(&mut self) -> bool {
-        if self.executions.len() < 4 {
-            if !self.handle_a_msg() {
-                return false
-            }
+        if !self.handle_a_msg() {
+            return false
         }
         self.execute_a_step();
         true
@@ -147,8 +144,8 @@ impl WorkflowProducer {
 }
 
 
-fn start_executor(chan: Sender<ConsumerMsg>) -> SyncSender<ExecutorMsg> {
-    let (executor_chan, executor_port) = sync_channel(1);
+fn start_executor(chan: Sender<ConsumerMsg>) -> Sender<ExecutorMsg> {
+    let (executor_chan, executor_port) = channel();
     let _ = thread::Builder::new().spawn(move || {
         let mut executor = WorkflowExecutor {
             executions: Default::default(),
@@ -226,7 +223,7 @@ fn test_run_workflows() {
     let producer_chan = start_producer(work_sender, number_of_workflows, number_of_steps);
     let executors = vec![start_executor(consumer_sender.clone()),
                          start_executor(consumer_sender.clone())];
-    let mut executor_queue: VecDeque<SyncSender<ExecutorMsg>> = executors.into_iter().collect();
+    let mut executor_queue: VecDeque<Sender<ExecutorMsg>> = executors.into_iter().collect();
     loop {
         let msg = {
             let sel = Select::new();
@@ -248,12 +245,9 @@ fn test_run_workflows() {
         let result = match msg {
              MainMsg::FromProducer(ProducerMsg::Incoming(workflow)) => {
                 let _ = consumer_sender.send(ConsumerMsg::ExpectWorkflow(workflow.id));
-                let mut handled = false;
-                while !handled {
-                    let executor = executor_queue.pop_front().unwrap();
-                    let sent = executor.try_send(ExecutorMsg::Execute(workflow.clone()));
+                if let Some(executor) = executor_queue.pop_front() {
+                    let _ = executor.send(ExecutorMsg::Execute(workflow));
                     executor_queue.push_back(executor);
-                    handled = sent.is_ok();
                 }
                 continue;
             },

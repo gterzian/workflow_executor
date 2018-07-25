@@ -9,10 +9,16 @@ use std::thread;
 type WorkflowId = usize;
 type NumberOfSteps = usize;
 type StepIndex = usize;
+type ExecutorId = usize;
 
 enum ExecutorMsg {
     Execute(Workflow),
     Quit
+}
+
+enum ExecutorControlMsg {
+    WantsWork,
+    DoesNotWantWork
 }
 
 enum ConsumerMsg {
@@ -36,9 +42,11 @@ enum ProducerControlMsg {
 
 enum MainMsg {
     FromProducer(ProducerMsg),
-    FromConsumer(ConsumerControlMsg)
+    FromConsumer(ConsumerControlMsg),
+    FromExecutor((ExecutorId, ExecutorControlMsg))
 }
 
+#[derive(Clone)]
 struct Workflow {
     pub id: WorkflowId,
     pub number_of_steps: NumberOfSteps,
@@ -53,14 +61,29 @@ impl Workflow {
     }
 }
 
+
+struct ExecutorControlChan {
+    id: ExecutorId,
+    chan: Sender<(ExecutorId, ExecutorControlMsg)>
+}
+
+impl ExecutorControlChan {
+    fn send(&self, msg: ExecutorControlMsg) {
+        let _ = self.chan.send((self.id, msg));
+    }
+}
+
+
 struct WorkflowExecution {
     pub current_step: Cell<StepIndex>,
 }
 
+
 struct WorkflowExecutor {
     executions: VecDeque<(Workflow, WorkflowExecution)>,
     port: Receiver<ExecutorMsg>,
-    chan: Sender<ConsumerMsg>
+    chan: Sender<ConsumerMsg>,
+    control_chan: ExecutorControlChan
 }
 
 impl WorkflowExecutor {
@@ -71,6 +94,9 @@ impl WorkflowExecutor {
                     current_step: Cell::new(0),
                 };
                 self.executions.push_back((workflow, execution));
+                if self.executions.len() > 2 {
+                    self.control_chan.send(ExecutorControlMsg::DoesNotWantWork);
+                }
             },
             Ok(ExecutorMsg::Quit) => {
                 return false
@@ -92,6 +118,9 @@ impl WorkflowExecutor {
                 self.executions.push_back((workflow, execution));
             } else {
                 let _ = self.chan.send(ConsumerMsg::Done(workflow.id));
+                if self.executions.len() < 2 {
+                    self.control_chan.send(ExecutorControlMsg::WantsWork);
+                }
             }
         }
     }
@@ -143,14 +172,14 @@ impl WorkflowProducer {
     }
 }
 
-
-fn start_executor(chan: Sender<ConsumerMsg>) -> Sender<ExecutorMsg> {
+fn start_executor(chan: Sender<ConsumerMsg>, control_chan: ExecutorControlChan) -> Sender<ExecutorMsg> {
     let (executor_chan, executor_port) = channel();
     let _ = thread::Builder::new().spawn(move || {
         let mut executor = WorkflowExecutor {
             executions: Default::default(),
             port: executor_port,
             chan: chan,
+            control_chan: control_chan
         };
         while executor.run() {
             // Running...
@@ -213,31 +242,51 @@ fn start_producer(chan: Sender<ProducerMsg>,
     producer_chan
 }
 
+fn executor_control_chan(id: ExecutorId,
+                         chan: Sender<(ExecutorId, ExecutorControlMsg)>)
+                         -> ExecutorControlChan {
+    ExecutorControlChan {
+        id: id,
+        chan: chan
+    }
+}
+
 #[test]
 fn test_run_workflows() {
     let (results_sender, results_receiver) = channel();
     let (work_sender, work_receiver) = channel();
+    let (executor_control_sender, executor_control_receiver) = channel();
     let number_of_workflows = 5;
     let number_of_steps = 4;
     let consumer_sender = start_consumer(results_sender, number_of_workflows, number_of_steps);
     let producer_chan = start_producer(work_sender, number_of_workflows, number_of_steps);
-    let executors = vec![start_executor(consumer_sender.clone()),
-                         start_executor(consumer_sender.clone())];
-    let mut executor_queue: VecDeque<Sender<ExecutorMsg>> = executors.into_iter().collect();
+    let executors = vec![(start_executor(consumer_sender.clone(),
+                                         executor_control_chan(1, executor_control_sender.clone())),
+                          1,
+                          Cell::new(true)),
+                          (start_executor(consumer_sender.clone(),
+                                         executor_control_chan(2, executor_control_sender.clone())),
+                          2,
+                          Cell::new(true))];
+    let mut executor_queue: VecDeque<(Sender<ExecutorMsg>, ExecutorId, Cell<bool>)> = executors.into_iter().collect();
     loop {
         let msg = {
             let sel = Select::new();
             let mut work_port = sel.handle(&work_receiver);
             let mut results_port = sel.handle(&results_receiver);
+            let mut executor_port = sel.handle(&executor_control_receiver);
             unsafe {
                 work_port.add();
                 results_port.add();
+                executor_port.add();
             }
             let ready = sel.wait();
             if ready == work_port.id() {
                 MainMsg::FromProducer(work_port.recv().unwrap())
             } else if ready == results_port.id() {
                 MainMsg::FromConsumer(results_port.recv().unwrap())
+            } else if ready == executor_port.id() {
+                MainMsg::FromExecutor(executor_port.recv().unwrap())
             } else {
                 panic!("unexpected select result")
             }
@@ -245,9 +294,35 @@ fn test_run_workflows() {
         let result = match msg {
              MainMsg::FromProducer(ProducerMsg::Incoming(workflow)) => {
                 let _ = consumer_sender.send(ConsumerMsg::ExpectWorkflow(workflow.id));
-                if let Some(executor) = executor_queue.pop_front() {
-                    let _ = executor.send(ExecutorMsg::Execute(workflow));
-                    executor_queue.push_back(executor);
+                let mut handled = false;
+                while !handled {
+                    let (sender, id, active) = executor_queue.pop_front().unwrap();
+                    if active.get() {
+                        let _ = sender.send(ExecutorMsg::Execute(workflow.clone()));
+                        handled = true;
+                    }
+                    executor_queue.push_back((sender, id, active));
+                }
+                continue;
+            },
+            MainMsg::FromExecutor((executor_id, msg)) => {
+                match msg {
+                    ExecutorControlMsg::WantsWork => {
+                        for (_sender, id, active) in executor_queue.iter_mut() {
+                            if *id == executor_id {
+                                active.set(true);
+                                break;
+                            }
+                        }
+                    }
+                    ExecutorControlMsg::DoesNotWantWork => {
+                        for (_sender, id, active) in executor_queue.iter_mut() {
+                            if *id == executor_id {
+                                active.set(false);
+                                break;
+                            }
+                        }
+                    }
                 }
                 continue;
             },
@@ -255,7 +330,7 @@ fn test_run_workflows() {
         };
         // The only message the consumer will send, is that all is done.
         assert_eq!(result, ConsumerControlMsg::AllWorkflowDone);
-        for executor in executor_queue {
+        for (executor, _, _) in executor_queue {
             let _ = executor.send(ExecutorMsg::Quit);
         }
         let _ = producer_chan.send(ProducerControlMsg::Quit);
